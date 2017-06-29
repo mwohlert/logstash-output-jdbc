@@ -19,13 +19,13 @@ class LogStash::Outputs::Jdbc < LogStash::Outputs::Base
 
   RETRYABLE_SQLSTATE_CLASSES = [
     # Classes of retryable SQLSTATE codes
-    # Not all in the class will be retryable. However, this is the best that 
+    # Not all in the class will be retryable. However, this is the best that
     # we've got right now.
     # If a custom state code is required, set it in retry_sql_states.
     '08', # Connection Exception
     '24', # Invalid Cursor State (Maybe retry-able in some circumstances)
-    '25', # Invalid Transaction State 
-    '40', # Transaction Rollback 
+    '25', # Invalid Transaction State
+    '40', # Transaction Rollback
     '53', # Insufficient Resources
     '54', # Program Limit Exceeded (MAYBE)
     '55', # Object Not In Prerequisite State
@@ -63,6 +63,9 @@ class LogStash::Outputs::Jdbc < LogStash::Outputs::Base
   # multiple inserts in 1 go
   config :unsafe_statement, validate: :boolean, default: false
 
+  # Error levels at which the statement is logged alongside the error/warning
+  config :log_statement, validate: :array, default: []
+
   # Number of connections in the pool to maintain
   config :max_pool_size, validate: :number, default: 24
 
@@ -80,7 +83,7 @@ class LogStash::Outputs::Jdbc < LogStash::Outputs::Base
   # Maximum time between retries, in seconds
   config :retry_max_interval, validate: :number, default: 128
 
-  # Any additional custom, retryable SQL state codes. 
+  # Any additional custom, retryable SQL state codes.
   # Suitable for configuring retryable custom JDBC SQL state codes.
   config :retry_sql_states, validate: :array, default: []
 
@@ -215,7 +218,7 @@ class LogStash::Outputs::Jdbc < LogStash::Outputs::Base
         statement = add_statement_event_params(statement, event) if @statement.length > 1
         statement.execute
       rescue => e
-        if retry_exception?(e)
+        if retry_exception?(e, statement)
           events_to_retry.push(event)
         end
       ensure
@@ -262,7 +265,7 @@ class LogStash::Outputs::Jdbc < LogStash::Outputs::Base
 
   def add_statement_event_params(statement, event)
     @statement[1..-1].each_with_index do |i, idx|
-      if i.is_a? String 
+      if i.is_a? String
         value = event.get(i)
         if value.nil? and i =~ /%\{/
           value = event.sprintf(i)
@@ -306,20 +309,24 @@ class LogStash::Outputs::Jdbc < LogStash::Outputs::Base
     statement
   end
 
-  def retry_exception?(exception)
+  def retry_exception?(exception, statement)
     retrying = (exception.respond_to? 'getSQLState' and (RETRYABLE_SQLSTATE_CLASSES.include?(exception.getSQLState.to_s[0,2]) or @retry_sql_states.include?(exception.getSQLState)))
-    log_jdbc_exception(exception, retrying)
+    log_jdbc_exception(exception, retrying, statement)
 
     retrying
   end
 
-  def log_jdbc_exception(exception, retrying)
+  def log_jdbc_exception(exception, retrying, statement)
     current_exception = exception
     log_text = 'JDBC - Exception. ' + (retrying ? 'Retrying' : 'Not retrying') + '.'
     log_method = (retrying ? 'warn' : 'error')
 
     loop do
-      @logger.send(log_method, log_text, :exception => current_exception)
+      if log_statement.include? log_method
+        @logger.send(log_method, log_text, :exception => current_exception, :statement => statement)
+      else
+        @logger.send(log_method, log_text, :exception => current_exception)
+      end
 
       if current_exception.respond_to? 'getNextException'
         current_exception = current_exception.getNextException()
