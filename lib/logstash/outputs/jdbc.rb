@@ -218,7 +218,7 @@ class LogStash::Outputs::Jdbc < LogStash::Outputs::Base
         statement = add_statement_event_params(statement, event) if @statement.length > 1
         statement.execute
       rescue => e
-        if retry_exception?(e, statement)
+        if retry_exception?(e, event)
           events_to_retry.push(event)
         end
       ensure
@@ -309,21 +309,21 @@ class LogStash::Outputs::Jdbc < LogStash::Outputs::Base
     statement
   end
 
-  def retry_exception?(exception, statement)
+  def retry_exception?(exception, event)
     retrying = (exception.respond_to? 'getSQLState' and (RETRYABLE_SQLSTATE_CLASSES.include?(exception.getSQLState.to_s[0,2]) or @retry_sql_states.include?(exception.getSQLState)))
-    log_jdbc_exception(exception, retrying, statement)
+    log_jdbc_exception(exception, retrying, event)
 
     retrying
   end
 
-  def log_jdbc_exception(exception, retrying, statement)
+  def log_jdbc_exception(exception, retrying, event)
     current_exception = exception
     log_text = 'JDBC - Exception. ' + (retrying ? 'Retrying' : 'Not retrying') + '.'
     log_method = (retrying ? 'warn' : 'error')
 
     loop do
       if log_statement.include? log_method
-        @logger.send(log_method, log_text, :exception => current_exception, :statement => statement)
+        @logger.send(log_method, log_text, :exception => current_exception, :statement => (@statement.length > 1) ? debug_statement(event) : @statement[0])
       else
         @logger.send(log_method, log_text, :exception => current_exception)
       end
@@ -342,4 +342,53 @@ class LogStash::Outputs::Jdbc < LogStash::Outputs::Base
     doubled = current_interval * 2
     doubled > @retry_max_interval ? @retry_max_interval : doubled
   end
+
+  def debug_statement(event)
+    result = @statement[0].dup
+    @statement[1..-1].each_with_index do |i, idx|
+      if i.is_a? String
+        value = event.get(i)
+        if value.nil? and i =~ /%\{/
+          value = event.sprintf(i)
+        end
+      else
+        value = i
+      end
+
+      case value
+      when Time
+        # See LogStash::Timestamp, below, for the why behind strftime.
+        result.sub!('?', '\'' << value.strftime(STRFTIME_FMT) << '\'')
+      when LogStash::Timestamp
+        # XXX: Using setString as opposed to setTimestamp, because setTimestamp
+        # doesn't behave correctly in some drivers (Known: sqlite)
+        #
+        # Additionally this does not use `to_iso8601`, since some SQL databases
+        # choke on the 'T' in the string (Known: Derby).
+        #
+        # strftime appears to be the most reliable across drivers.
+        result.sub!('?', '\'' << value.time.strftime(STRFTIME_FMT) << '\'')
+      when Fixnum, Integer
+        if value > 2147483647 or value < -2147483648
+          result.sub!('?',value)
+        else
+          result.sub!('?',value)
+        end
+      when Float
+          result.sub!('?',value)
+      when String
+          result.sub!('?','\'' << value << '\'')
+      when Array, Hash
+          result.sub!('?','\'' << value.to_json << '\'')
+      when true, false
+          result.sub!('?',value)
+      else
+          result.sub!('?','NULL')
+      end
+    end
+
+    result
+  end
+
+
 end # class LogStash::Outputs::jdbc
